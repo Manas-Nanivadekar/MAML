@@ -24,6 +24,21 @@ class SineTaskGenerator:
         return x, y
 
 
+class SimpleMLP(nn.Module):
+    def __init__(self, hidden_size=40):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, 1),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 gen = SineTaskGenerator()
 amp, phase = gen.sample_task()
 x_train, y_train = gen.generate_data(amp, phase, num_samples=10)
@@ -31,3 +46,6 @@ x_test, y_test = gen.generate_data(amp, phase, num_samples=10)
 
 print(f"Task: amplitude={amp:.2f}, phase={phase:.2f}")
 print(f"Train data: x shape {x_train.shape}, y shape {y_train.shape}")
+
+model = SimpleMLP(hidden_size=40)
+print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
