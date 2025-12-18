@@ -107,4 +107,60 @@ def train_maml(
     return model
 
 
+def test_maml(model, num_test_tasks=5):
+    task_generator = SineTaskGenerator()
+    inner_lr = 0.01
+
+    fig, axes = plt.subplots(1, num_test_tasks, figsize=(20, 4))
+    for idx in range(num_test_tasks):
+        amp, phase = task_generator.sample_task()
+        x_support, y_support = task_generator.generate_data(amp, phase, num_samples=10)
+
+        x_test = torch.linspace(-5, 5, 100).unsqueeze(1)
+        y_test_true = amp * torch.sin(x_test + phase)
+
+        with torch.no_grad():
+            y_pred_before = model(x_test)
+
+        adapted_params = inner_loop(
+            model, x_support, y_support, inner_lr=inner_lr, inner_steps=50
+        )
+
+        with torch.no_grad():
+            y_pred_after = functional_forward(model, x_test, adapted_params)
+
+        ax = axes[idx]
+        ax.plot(x_test.numpy(), y_test_true.numpy(), "k-", label="True", linewidth=2)
+        ax.plot(
+            x_test.numpy(),
+            y_pred_before.numpy(),
+            "b--",
+            label="Before adaptation",
+            alpha=0.6,
+        )
+        ax.plot(
+            x_test.numpy(),
+            y_pred_after.numpy(),
+            "r-",
+            label="After 50 steps",
+            linewidth=2,
+        )
+        ax.scatter(
+            x_support.numpy(),
+            y_support.numpy(),
+            c="green",
+            s=100,
+            marker="x",
+            label="Support data",
+        )
+        ax.set_title(f"Task {idx+1}")
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("outputs/maml_results.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
 model = train_maml()
+test_maml(model)
