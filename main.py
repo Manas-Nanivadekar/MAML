@@ -39,13 +39,72 @@ class SimpleMLP(nn.Module):
         return self.net(x)
 
 
-gen = SineTaskGenerator()
-amp, phase = gen.sample_task()
-x_train, y_train = gen.generate_data(amp, phase, num_samples=10)
-x_test, y_test = gen.generate_data(amp, phase, num_samples=10)
+def inner_loop(model, x_support, y_support, inner_lr=0.01, inner_steps=5):
+    params = list(model.parameters())
 
-print(f"Task: amplitude={amp:.2f}, phase={phase:.2f}")
-print(f"Train data: x shape {x_train.shape}, y shape {y_train.shape}")
+    for step in range(inner_steps):
+        if step == 0:
+            y_pred = model(x_support)
+        else:
+            y_pred = functional_forward(model, x_support, params)
+    loss = nn.MSELoss()(y_pred, y_support)
+    grads = torch.autograd.grad(loss, params, create_graph=True)
+    params = [p - inner_lr * g for p, g in zip(params, grads)]
+    return params
 
-model = SimpleMLP(hidden_size=40)
-print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+
+def outer_loop_loss(model, adapted_params, x_query, y_query):
+    y_pred = functional_forward(model, x_query, adapted_params)
+    loss = nn.MSELoss()(y_pred, y_query)
+    return loss
+
+
+def functional_forward(model, x, params):
+    x = torch.relu(torch.mm(x, params[0].t()) + params[1])
+    x = torch.relu(torch.mm(x, params[2].t()) + params[3])
+    x = torch.mm(x, params[4].t()) + params[5]
+    return x
+
+
+def train_maml(
+    num_iterations=10000,
+    num_tasks_per_batch=4,
+    inner_lr=0.01,
+    outer_lr=0.001,
+    inner_steps=5,
+):
+    model = SimpleMLP(hidden_size=40)
+    meta_optimizer = torch.optim.Adam(model.parameters(), lr=outer_lr)
+    task_generator = SineTaskGenerator()
+
+    for iteration in range(num_iterations):
+        meta_optimizer.zero_grad()
+        meta_loss = 0.0
+
+        for task_idx in range(num_tasks_per_batch):
+            amp, phase = task_generator.sample_task()
+
+            x_support, y_support = task_generator.generate_data(
+                amp, phase, num_samples=10
+            )
+            x_query, y_query = task_generator.generate_data(amp, phase, num_samples=10)
+
+            adapted_params = inner_loop(
+                model, x_support, y_support, inner_lr=inner_lr, inner_steps=inner_steps
+            )
+
+            task_loss = outer_loop_loss(model, adapted_params, x_query, y_query)
+            meta_loss += task_loss
+
+        meta_loss = meta_loss / num_tasks_per_batch
+
+        meta_loss.backward()
+        meta_optimizer.step()
+
+        if iteration % 1000 == 0:
+            print(f"Iteration {iteration}, Meta Loss: {meta_loss.item():.4f}")
+
+    return model
+
+
+model = train_maml()
