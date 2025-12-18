@@ -53,6 +53,26 @@ def inner_loop(model, x_support, y_support, inner_lr=0.01, inner_steps=5):
     return params
 
 
+def inner_loop_fomaml(model, x_support, y_support, inner_lr=0.01, inner_steps=5):
+    params = [p.clone() for p in model.parameters()]
+
+    for step in range(inner_steps):
+        if step == 0:
+            y_pred = model(x_support)
+        else:
+            y_pred = functional_forward(model, x_support, params)
+        loss = nn.MSELoss()(y_pred, y_support)
+
+        grads = torch.autograd.grad(
+            loss, params if step > 0 else list(model.parameters()), create_graph=False
+        )
+
+        params = [p - inner_lr * g for p, g in zip(params, grads)]
+        params = [p.detach().requires_grad_(True) for p in params]
+
+    return params
+
+
 def outer_loop_loss(model, adapted_params, x_query, y_query):
     y_pred = functional_forward(model, x_query, adapted_params)
     loss = nn.MSELoss()(y_pred, y_query)
@@ -98,6 +118,45 @@ def train_maml(
 
         meta_loss = meta_loss / num_tasks_per_batch
 
+        meta_loss.backward()
+        meta_optimizer.step()
+
+        if iteration % 1000 == 0:
+            print(f"Iteration {iteration}, Meta Loss: {meta_loss.item():.4f}")
+
+    return model
+
+
+def train_fomaml(
+    num_iterations=10000,
+    num_tasks_per_batch=4,
+    inner_lr=0.01,
+    outer_lr=0.001,
+    inner_steps=5,
+):
+    model = SimpleMLP(hidden_size=40)
+    meta_optimizer = torch.optim.Adam(model.parameters(), lr=outer_lr)
+    task_generator = SineTaskGenerator()
+
+    for iteration in range(num_iterations):
+        meta_optimizer.zero_grad()
+        meta_loss = 0.0
+
+        for task_idx in range(num_tasks_per_batch):
+            amp, phase = task_generator.sample_task()
+            x_support, y_support = task_generator.generate_data(
+                amp, phase, num_samples=10
+            )
+            x_query, y_query = task_generator.generate_data(amp, phase, num_samples=10)
+
+            adapted_params = inner_loop_fomaml(
+                model, x_support, y_support, inner_lr=inner_lr, inner_steps=inner_steps
+            )
+
+            task_loss = outer_loop_loss(model, adapted_params, x_query, y_query)
+            meta_loss += task_loss
+
+        meta_loss = meta_loss / num_tasks_per_batch
         meta_loss.backward()
         meta_optimizer.step()
 
@@ -162,5 +221,53 @@ def test_maml(model, num_test_tasks=5):
     plt.close()
 
 
-model = train_maml()
-test_maml(model)
+# model = train_maml()
+# test_maml(model)
+fomaml_model = train_fomaml(num_iterations=10000)
+
+
+def compare_inner_steps(model, steps_list=[5, 20, 50, 100]):
+    task_generator = SineTaskGenerator()
+
+    fig, axes = plt.subplots(len(steps_list), 5, figsize=(20, 4 * len(steps_list)))
+
+    for step_idx, inner_steps in enumerate(steps_list):
+        for task_idx in range(5):
+            amp, phase = task_generator.sample_task()
+            x_support, y_support = task_generator.generate_data(
+                amp, phase, num_samples=10
+            )
+
+            x_test = torch.linspace(-5, 5, 100).unsqueeze(1)
+            y_test_true = amp * torch.sin(x_test + phase)
+
+            with torch.no_grad():
+                y_pred_before = model(x_test)
+
+            adapted_params = inner_loop_fomaml(
+                model, x_support, y_support, inner_lr=0.01, inner_steps=inner_steps
+            )
+
+            with torch.no_grad():
+                y_pred_after = functional_forward(model, x_test, adapted_params)
+
+            ax = axes[step_idx, task_idx]
+            ax.plot(x_test.numpy(), y_test_true.numpy(), "k-", linewidth=2)
+            ax.plot(x_test.numpy(), y_pred_before.numpy(), "b--", alpha=0.6)
+            ax.plot(x_test.numpy(), y_pred_after.numpy(), "r-", linewidth=2)
+            ax.scatter(
+                x_support.numpy(), y_support.numpy(), c="green", s=100, marker="x"
+            )
+
+            if task_idx == 0:
+                ax.set_ylabel(f"{inner_steps} steps", fontsize=12, fontweight="bold")
+            if step_idx == 0:
+                ax.set_title(f"Task {task_idx+1}")
+            ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("outputs/fomaml_comparison.png", dpi=150, bbox_inches="tight")
+    plt.close()
+
+
+compare_inner_steps(fomaml_model)
